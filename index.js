@@ -338,6 +338,18 @@ async function processVideo(filePath, options = {}) {
       ui.field('Audio', `${audio.codec}, ${audio.channels}ch`);
     }
 
+    // A file this tool already produced needs no probe and no second generation
+    // of loss, unless the user is deliberately asking for different settings
+    // than it was made with. Recognising it before settings are resolved means
+    // a batch neither samples it nor asks which preset to skip it with.
+    const already = previouslyProcessed(filePath, analysis);
+    if (already && !options.force) {
+      ui.blank();
+      ui.warn(`Already encoded by vencode (recognised by ${already.source})`);
+      ui.info('Skipped, no changes made. Use --force to encode it again');
+      return { status: 'skipped', deletePreference };
+    }
+
     if (!proposal.shouldReencode) {
       ui.blank();
       ui.warn(`${proposal.reason}, expect little gain from reencoding`);
@@ -361,17 +373,6 @@ async function processVideo(filePath, options = {}) {
 
     // Resolved per file: a batch shares one preset, but each source has its own
     // audio, so the copy-or-encode decision cannot be shared along with it.
-    // A file this tool already produced needs no probe and no second
-    // generation of loss, unless the user is deliberately asking for different
-    // settings than it was made with.
-    const already = previouslyProcessed(filePath, analysis);
-    if (already && !options.force) {
-      ui.blank();
-      ui.warn(`Already encoded by vencode (recognised by ${already.source})`);
-      ui.info('Skipped, no changes made. Use --force to encode it again');
-      return { status: 'skipped', deletePreference };
-    }
-
     const audio = resolveAudioPlan(analysis, settings);
 
     // Whether reencoding is worth doing cannot be decided from codec names, so
