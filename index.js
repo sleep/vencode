@@ -3,7 +3,8 @@
 import { analyzeVideo, proposeEncoding, formatBytes } from './analyzer.js';
 import { encodeVideo, replaceOriginal, removeBackup, abortActiveEncode } from './encoder.js';
 import { PRESETS, MEASURED_PRESET, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan, resolveVideoPlan, resolvePixelFormat } from './presets.js';
-import { shouldSample, measureVideoBitrate } from './sampler.js';
+import { shouldSample, measureVideoBitrate, probeVideoBitrate } from './sampler.js';
+import { previouslyProcessed, recordProcessed, indexPath } from './marker.js';
 import * as ui from './ui.js';
 import prompts from 'prompts';
 import fs from 'fs';
@@ -346,8 +347,27 @@ async function processVideo(filePath, options = {}) {
 
     // Resolved per file: a batch shares one preset, but each source has its own
     // audio, so the copy-or-encode decision cannot be shared along with it.
+    // A file this tool already produced needs no probe and no second
+    // generation of loss, unless the user is deliberately asking for different
+    // settings than it was made with.
+    const already = previouslyProcessed(filePath, analysis);
+    if (already && !options.force) {
+      ui.blank();
+      ui.warn(`Already encoded by vencode (recognised by ${already.source})`);
+      ui.info('Skipped, no changes made. Use --force to encode it again');
+      return { status: 'skipped', deletePreference };
+    }
+
     const audio = resolveAudioPlan(analysis, settings);
-    const video = resolveVideoPlan(analysis, settings, path.extname(filePath));
+
+    // Whether reencoding is worth doing cannot be decided from codec names, so
+    // a short conservative probe measures what it would actually produce.
+    const probed = await probeVideoBitrate(filePath, analysis, {
+      ...settings,
+      pixelFormat: resolvePixelFormat(analysis)
+    }).catch(() => null);
+
+    const video = resolveVideoPlan(analysis, settings, path.extname(filePath), probed);
     const effectiveSettings = {
       ...settings,
       audioCopy: audio.copy,
@@ -370,9 +390,13 @@ async function processVideo(filePath, options = {}) {
       ui.blank();
     }
 
+    // Rewriting gigabytes to reproduce the same streams wastes time and, via
+    // container overhead, usually ends up marginally larger.
     if (video.copy && audio.copy) {
-      ui.warn('Both streams would be copied, so reencoding would change nothing');
+      ui.warn('Nothing to gain: both streams would be copied unchanged');
       ui.blank();
+      ui.info('Skipped, no changes made');
+      return { status: 'skipped', deletePreference };
     }
 
     const encodedPath = await runEncode(filePath, analysis, effectiveSettings);
@@ -393,6 +417,8 @@ async function processVideo(filePath, options = {}) {
     }
     ui.field('Backup', displayPath(result.backupPath));
     ui.blank();
+
+    recordProcessed(filePath, effectiveSettings);
 
     const backup = await resolveBackup(result.backupPath, options);
 
@@ -461,9 +487,16 @@ function printProjection(scanned, settings, totalBytes) {
   // Custom settings carry no sizeFactor, so there is nothing to project from.
   if (!settings?.sizeFactor) return;
 
+  // A file whose video will be copied keeps its size, so projecting an encode
+  // for it advertises savings that cannot happen.
   const projected = scanned
     .filter((entry) => entry.analysis)
-    .reduce((sum, entry) => sum + estimateSize(entry.analysis, settings), 0);
+    .reduce((sum, entry) => {
+      const plan = resolveVideoPlan(entry.analysis, settings, path.extname(entry.filePath));
+      return sum + (plan.copy
+        ? Number(entry.analysis.fileSize)
+        : estimateSize(entry.analysis, settings));
+    }, 0);
 
   const savings = totalBytes - projected;
   if (savings <= 0) return;
@@ -602,6 +635,7 @@ function parseArgs(argv) {
     verbose: false,
     assumeYes: false,
     deleteBackups: false,
+    force: false,
     help: false,
     presetKey: null,
     paths: []
@@ -616,6 +650,8 @@ function parseArgs(argv) {
       options.assumeYes = true;
     } else if (arg === '--delete-backups') {
       options.deleteBackups = true;
+    } else if (arg === '--force') {
+      options.force = true;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else if (arg.startsWith('--preset=')) {
@@ -652,6 +688,7 @@ function printHelp() {
   ui.field('-y, --yes', 'Skip prompts, use the balanced preset', 20);
   ui.field('--preset=<name>', `One of ${Object.keys(PRESETS).join(', ')}`, 20);
   ui.field('--delete-backups', 'With --yes, remove backups after encoding', 20);
+  ui.field('--force', 'Reencode even if vencode made the file', 20);
   ui.field('-h, --help', 'Show this help message', 20);
 
   ui.heading('Examples');
@@ -664,6 +701,7 @@ function printHelp() {
   ui.line(`Recognised extensions: ${[...VIDEO_EXTENSIONS].join(' ')}`);
   ui.line('In a batch the first encoded file\'s settings are reused for the rest.');
   ui.line('The original is backed up before it is replaced.');
+  ui.line(`Files vencode has made are remembered in ${indexPath()}`);
   ui.blank();
 }
 

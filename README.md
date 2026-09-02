@@ -20,6 +20,8 @@ Interactive video reencoding tool that analyzes your videos and reencodes them t
 - **Bit Depth Preservation**: Keeps 10-bit sources at 10-bit rather than flattening them to 8-bit
 - **Stream Retention**: Keeps every audio track, subtitle track and attachment, not just the first of each
 - **Measured Estimates**: Encodes short samples of the real file so the preset menu shows a measured size rather than a guess
+- **Measured Reencode Decision**: Probes what a reencode would actually produce rather than guessing from codec names
+- **Repeat-Run Safe**: Marks its own output so a second run skips it instead of adding another generation of loss
 - **Safe Interrupt**: Ctrl+C stops ffmpeg, discards the partial output, restores the cursor, and leaves the original untouched
 - **Non-interactive Mode**: `--yes` and `--preset` for scripted runs
 
@@ -80,6 +82,7 @@ node index.js --help
 | `-y`, `--yes` | Skip prompts, use the balanced preset |
 | `--preset=<name>` | `MAXIMUM_QUALITY`, `HIGH_QUALITY`, `BALANCED`, `MAXIMUM_COMPRESSION`, `HEVC_HIGH` |
 | `--delete-backups` | With `--yes`, remove backups after encoding |
+| `--force` | Reencode even if vencode made the file |
 | `-h`, `--help` | Show this help message |
 
 Exit codes: `0` on success, `1` on failure or bad arguments, `130` if interrupted.
@@ -259,19 +262,23 @@ Note that ffmpeg's built in AAC encoder is variable rate and saturates around
 
 Like audio, the video stream is decided per file rather than blindly reencoded.
 
-### Codec downgrades are refused
+### Reencoding is decided by measurement
 
-Transcoding into a less efficient codec is never quality-neutral and usually
-grows the file. An HEVC source reencoded to H.264 at CRF 18 measured **+91%
-larger** while losing quality. Sources whose codec already beats the preset's
-target are therefore copied through untouched:
+Whether reencoding helps cannot be answered from codec names. Codec efficiency
+rankings compare codecs *at equal quality*, but a 180 Mbps near-lossless HEVC
+capture is nowhere near equal quality: reencoding it to H.264 at CRF 18 measured
+**75% smaller**. An already-lean HEVC file at the same settings would grow.
 
-```
-  Video         copied, no re-encode (hevc is already more efficient than libx264)
-```
+So a short conservative probe encodes a few seconds at the chosen settings and
+projects the result. If the reduction clears 10%, the file is reencoded;
+otherwise it is copied through untouched with the measured reason given. The
+probe uses a faster x264 preset than the real encode, which produces *larger*
+output at the same CRF, so it never overstates the benefit.
 
-Pick the HEVC preset to genuinely reencode such a file. This also fixes `.webm`
-input, which previously failed outright because libx264 cannot be muxed into it.
+Codec rank survives only as a fallback when no measurement is possible. The
+container check is a hard constraint and outranks both, which is what fixes
+`.webm` input previously failing outright because libx264 cannot be muxed into
+it.
 
 ### Bit depth is preserved
 
@@ -308,6 +315,30 @@ the old model predicted an identical 28.2 MB for all three:
 Sampling costs roughly 18 seconds of encoding regardless of length, so about 6%
 at the five-minute threshold and negligible on a feature-length file. Shorter
 files skip it and say so.
+
+## Repeat Runs
+
+Every file vencode produces is marked, so a later run recognises its own output
+instead of reencoding it into another generation of loss:
+
+```
+  !   Already encoded by vencode (recognised by metadata)
+  ·   Skipped, no changes made. Use --force to encode it again
+```
+
+Two layers, because neither alone covers every case:
+
+| Layer | Covers | Notes |
+| --- | --- | --- |
+| Embedded tag | `VENCODE` on Matroska, `comment` elsewhere | Travels with the file through moves, renames and copies; survives a stream-copy remux |
+| Local index | Everything, including containers that drop tags | `~/.config/vencode/processed.json`, keyed by content so renames still match |
+
+The index key is the file size plus its first and last 4 MB rather than a full
+hash: it answers "did this tool make this file" in 0.24s where a full sha256 of
+the same 2.8 GB file takes 6.0s, and it still changes whenever the file is
+reencoded.
+
+Pass `--force` to reencode anyway.
 
 ## Safety Features
 

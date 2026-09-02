@@ -3,6 +3,7 @@ import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
 import fs from 'fs';
 import path from 'path';
+import { markerOutputOptions } from './marker.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
@@ -89,6 +90,10 @@ export function buildOutputOptions(settings, extension) {
   // Without this a matroska output re-encodes subtitles to ASS, which aborts
   // outright on the bitmap subtitles used by most disc rips.
   options.push('-c:s', 'copy');
+
+  // Stamp the file as vencode's work so a later run can recognise it without
+  // reprobing, and without relying on bitrate heuristics alone.
+  options.push(...markerOutputOptions(settings, ext));
 
   if (MP4_FAMILY.has(ext)) {
     // QuickTime and Safari refuse the 'hev1' tag that a copy would preserve.

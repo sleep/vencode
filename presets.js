@@ -76,6 +76,14 @@ const DEFAULT_RANK = 2;
 // relative to it via sizeFactor.
 export const MEASURED_PRESET = 'BALANCED';
 
+// How far above a target bitrate a source may sit and still count as meeting
+// it. Guards against re-encoding a file this tool just produced.
+const REENCODE_TOLERANCE = 0.1;
+
+// Minimum size reduction that justifies spending an encode and a generation of
+// quality on the video stream.
+const MIN_WORTHWHILE_REDUCTION = 0.1;
+
 // Pixel formats carrying more than 8 bits per component.
 const HIGH_DEPTH_SUFFIX = /(10|12|14|16)(le|be)$/;
 const HIGH_DEPTH_NAMES = new Set(['p010le', 'p210le', 'p410le']);
@@ -111,20 +119,38 @@ export function resolvePixelFormat(analysis) {
  *
  * @returns {Object} `{ copy, pixelFormat, reason }`
  */
-export function resolveVideoPlan(analysis, settings, extension = '') {
+export function resolveVideoPlan(analysis, settings, extension = '', projectedVideoBps = null) {
   const ext = extension.toLowerCase();
   const sourceCodec = analysis.videoCodec;
-  const sourceRank = CODEC_RANK.get(sourceCodec) ?? DEFAULT_RANK;
-  const targetRank = CODEC_RANK.get(settings.videoCodec) ?? DEFAULT_RANK;
+  const encode = { copy: false, pixelFormat: resolvePixelFormat(analysis), reason: null };
 
   // The output container is inherited from the input, so a target codec the
-  // muxer cannot hold would hard fail (this is why .webm input fails today).
+  // muxer cannot hold would hard fail. This one is a hard constraint, not a
+  // judgement call, so it outranks any measurement.
   if (VP_ONLY_CONTAINERS.has(ext) && !VP_CODECS.has(settings.videoCodec)) {
+    return { copy: true, reason: `${ext} cannot hold ${settings.videoCodec}` };
+  }
+
+  // Prefer a measurement. Codec identity alone is misleading, because it
+  // compares codecs at equal quality: an over-provisioned 180 Mbps HEVC capture
+  // shrinks by three quarters under H.264 at CRF 18 despite HEVC being the
+  // better codec, while an already-lean HEVC file would grow.
+  if (projectedVideoBps !== null && analysis.duration > 0) {
+    const projectedBytes = (projectedVideoBps / 8) * analysis.duration;
+    const reduction = 1 - projectedBytes / Number(analysis.fileSize);
+
+    if (reduction >= MIN_WORTHWHILE_REDUCTION) return encode;
+
     return {
       copy: true,
-      reason: `${ext} cannot hold ${settings.videoCodec}`
+      reason: `reencoding would only change size by ${Math.round(reduction * 100)}%`
     };
   }
+
+  // No measurement available: fall back to codec rank, which at least catches
+  // the clear-cut downgrades.
+  const sourceRank = CODEC_RANK.get(sourceCodec) ?? DEFAULT_RANK;
+  const targetRank = CODEC_RANK.get(settings.videoCodec) ?? DEFAULT_RANK;
 
   if (sourceRank < targetRank) {
     return {
@@ -133,7 +159,7 @@ export function resolveVideoPlan(analysis, settings, extension = '') {
     };
   }
 
-  return { copy: false, pixelFormat: resolvePixelFormat(analysis), reason: null };
+  return encode;
 }
 
 /**
@@ -163,7 +189,12 @@ export function resolveAudioPlan(analysis, settings) {
     return { copy: false, bitrate: target, reason: 'source bitrate unknown' };
   }
 
-  if (source.codec === settings.audioCodec && sourceKbps <= target) {
+  // Encoders overshoot their own target slightly, so a file this tool produced
+  // at 320 measures ~322 and an exact comparison would re-encode it on every
+  // subsequent run, losing a generation each time. Shaving a few percent off
+  // the audio of a video file is worth far less than that, so treat anything
+  // near the target as already satisfying it.
+  if (source.codec === settings.audioCodec && sourceKbps <= target * (1 + REENCODE_TOLERANCE)) {
     return {
       copy: true,
       bitrate: sourceKbps,

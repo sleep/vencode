@@ -1,12 +1,77 @@
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
+import { spawn } from 'child_process';
 
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
 
 // Transfer functions that denote HDR: PQ (HDR10/Dolby Vision) and HLG.
 const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67']);
+
+/**
+ * Measures an audio stream's bitrate by summing its packet sizes.
+ *
+ * Matroska stores no per-stream bitrate, so ffprobe reports it as N/A for every
+ * .mkv. Without this the audio plan cannot tell whether reencoding would gain
+ * anything and falls back to encoding at the preset target, which inflates
+ * audio that was already fine. ffprobe reads packet headers rather than payload,
+ * so this costs a fraction of a second even on multi-gigabyte files.
+ *
+ * @param {string} filePath - Path to the video file
+ * @param {number} duration - Container duration in seconds
+ * @returns {Promise<number|null>} Bits per second, or null if unmeasurable
+ */
+function measureAudioBitrate(filePath, duration) {
+  return new Promise((resolve) => {
+    if (!Number.isFinite(duration) || duration <= 0) {
+      resolve(null);
+      return;
+    }
+
+    const probe = spawn(ffprobePath.path, [
+      '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'packet=size',
+      '-of', 'csv=p=0',
+      filePath
+    ]);
+
+    // Summed incrementally: a long file has hundreds of thousands of packets,
+    // and buffering them all just to add them up is pointless.
+    let totalBytes = 0;
+    let remainder = '';
+
+    probe.stdout.on('data', (chunk) => {
+      const lines = (remainder + chunk).split('\n');
+      remainder = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const size = Number(line);
+        if (Number.isFinite(size)) totalBytes += size;
+      }
+    });
+
+    probe.on('error', () => resolve(null));
+    probe.on('close', (code) => {
+      const trailing = Number(remainder);
+      if (Number.isFinite(trailing)) totalBytes += trailing;
+
+      resolve(code === 0 && totalBytes > 0 ? (totalBytes * 8) / duration : null);
+    });
+  });
+}
+
+/**
+ * Coerces an ffprobe field to a number, treating its 'N/A' placeholder as absent.
+ *
+ * @param {*} value - Raw ffprobe field
+ * @returns {number|null} The number, or null when unavailable
+ */
+function toFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 /**
  * Parses ffprobe's rational frame rate, e.g. "30/1" or "24000/1001".
@@ -34,7 +99,7 @@ function parseFrameRate(rate) {
  */
 export async function analyzeVideo(filePath) {
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
+    ffmpeg.ffprobe(filePath, async (err, metadata) => {
       if (err) {
         reject(err);
         return;
@@ -54,9 +119,9 @@ export async function analyzeVideo(filePath) {
 
       const analysis = {
         filePath,
-        fileSize,
-        duration,
-        bitrate: parseInt(bitrate),
+        fileSize: toFiniteNumber(fileSize) ?? 0,
+        duration: toFiniteNumber(duration) ?? 0,
+        bitrate: toFiniteNumber(bitrate),
         videoCodec: videoStream.codec_name,
         width: videoStream.width,
         height: videoStream.height,
@@ -70,12 +135,23 @@ export async function analyzeVideo(filePath) {
         isHDR: HDR_TRANSFERS.has(videoStream.color_transfer),
         audioStreams: audioStreams.map(a => ({
           codec: a.codec_name,
-          bitrate: a.bit_rate ? parseInt(a.bit_rate) : null,
+          // ffprobe yields the string 'N/A' when a container carries no bitrate,
+          // which is truthy and parses to NaN, so it must be normalised to null.
+          bitrate: toFiniteNumber(a.bit_rate),
           channels: a.channels,
           sampleRate: a.sample_rate
         })),
-        format: metadata.format.format_name
+        format: metadata.format.format_name,
+        formatTags: metadata.format.tags ?? {}
       };
+
+      // Matroska reports no per-stream bitrate, so measure the first track
+      // rather than leaving the audio plan to guess.
+      const firstAudio = analysis.audioStreams[0];
+      if (firstAudio && firstAudio.bitrate === null) {
+        firstAudio.bitrate = await measureAudioBitrate(filePath, duration);
+        firstAudio.bitrateMeasured = firstAudio.bitrate !== null;
+      }
 
       resolve(analysis);
     });

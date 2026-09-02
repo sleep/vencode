@@ -43,27 +43,35 @@ export function shouldSample(analysis) {
   return Number.isFinite(analysis.duration) && analysis.duration >= MIN_DURATION_FOR_SAMPLING;
 }
 
+// A far cheaper, deliberately conservative probe used only to decide whether
+// reencoding is worth doing at all. A faster x264 preset produces LARGER output
+// at the same CRF, so if even this shows a worthwhile reduction, the real encode
+// at the preset's own speed will do at least as well.
+const PROBE_SEGMENTS = 3;
+const PROBE_SECONDS = 2;
+const PROBE_PRESET = 'veryfast';
+
 /** Evenly spaced sample start times across the body of the video. */
-function samplePositions(duration) {
+function samplePositions(duration, count, seconds) {
   const start = duration * EDGE_MARGIN;
-  const usable = duration * (1 - 2 * EDGE_MARGIN) - SEGMENT_SECONDS;
+  const usable = duration * (1 - 2 * EDGE_MARGIN) - seconds;
   if (usable <= 0) return [0];
 
   return Array.from(
-    { length: SEGMENT_COUNT },
-    (_, i) => start + (usable * i) / Math.max(1, SEGMENT_COUNT - 1)
+    { length: count },
+    (_, i) => start + (usable * i) / Math.max(1, count - 1)
   );
 }
 
 /** Encodes one segment and returns the bytes of video it produced. */
-function encodeSegment(inputPath, settings, position, outputPath) {
+function encodeSegment(inputPath, settings, position, seconds, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
       // Seeking before -i is a keyframe seek, which is near-instant; seeking
       // after would decode everything up to the position and dominate the cost.
       .inputOptions(['-ss', String(position)])
       .outputOptions([
-        '-t', String(SEGMENT_SECONDS),
+        '-t', String(seconds),
         '-c:v', settings.videoCodec,
         '-crf', String(settings.crf),
         '-preset', settings.preset,
@@ -94,9 +102,9 @@ function encodeSegment(inputPath, settings, position, outputPath) {
  * @param {Function} [onProgress] - Receives completion in the range 0-1
  * @returns {Promise<number|null>} Video bits per second, or null if unmeasurable
  */
-export async function measureVideoBitrate(inputPath, analysis, settings, onProgress = null) {
+async function sample(inputPath, analysis, settings, count, seconds, onProgress) {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vencode-sample-'));
-  const positions = samplePositions(analysis.duration);
+  const positions = samplePositions(analysis.duration, count, seconds);
 
   let totalBytes = 0;
   let measuredSeconds = 0;
@@ -106,8 +114,8 @@ export async function measureVideoBitrate(inputPath, analysis, settings, onProgr
       const segmentPath = path.join(workDir, `s${index}.mp4`);
 
       try {
-        totalBytes += await encodeSegment(inputPath, settings, position, segmentPath);
-        measuredSeconds += SEGMENT_SECONDS;
+        totalBytes += await encodeSegment(inputPath, settings, position, seconds, segmentPath);
+        measuredSeconds += seconds;
       } catch {
         // A segment can fail near a damaged region; the rest still measure fine.
       }
@@ -120,4 +128,28 @@ export async function measureVideoBitrate(inputPath, analysis, settings, onProgr
 
   if (measuredSeconds === 0 || totalBytes === 0) return null;
   return (totalBytes * 8) / measuredSeconds;
+}
+
+export async function measureVideoBitrate(inputPath, analysis, settings, onProgress = null) {
+  return sample(inputPath, analysis, settings, SEGMENT_COUNT, SEGMENT_SECONDS, onProgress);
+}
+
+/**
+ * Cheap, conservative estimate of the video bitrate a reencode would produce.
+ *
+ * Used to decide copy vs reencode. Codec identity alone cannot answer that: a
+ * 180 Mbps HEVC capture shrinks enormously under H.264 at CRF 18, even though
+ * HEVC is nominally the better codec. Only measuring settles it.
+ *
+ * @returns {Promise<number|null>} Video bits per second, or null if unmeasurable
+ */
+export async function probeVideoBitrate(inputPath, analysis, settings) {
+  return sample(
+    inputPath,
+    analysis,
+    { ...settings, preset: PROBE_PRESET },
+    PROBE_SEGMENTS,
+    PROBE_SECONDS,
+    null
+  );
 }
