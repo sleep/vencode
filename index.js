@@ -2,7 +2,8 @@
 
 import { analyzeVideo, proposeEncoding, formatBytes } from './analyzer.js';
 import { encodeVideo, replaceOriginal, removeBackup, abortActiveEncode } from './encoder.js';
-import { PRESETS, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan } from './presets.js';
+import { PRESETS, MEASURED_PRESET, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan, resolveVideoPlan, resolvePixelFormat } from './presets.js';
+import { shouldSample, measureVideoBitrate } from './sampler.js';
 import * as ui from './ui.js';
 import prompts from 'prompts';
 import fs from 'fs';
@@ -28,6 +29,16 @@ function conciseError(error) {
 
   if (lines.length <= 1) return raw;
   return `${lines[0]} (${lines[lines.length - 1]})`;
+}
+
+/** One-line description of what will happen to the video stream. */
+function describeVideoPlan(video, settings) {
+  if (video.copy) {
+    return `${ui.style.green('copied')}, no re-encode (${video.reason})`;
+  }
+
+  const depth = video.pixelFormat === 'yuv420p10le' ? ', 10-bit preserved' : '';
+  return `${settings.videoCodec}, CRF ${settings.crf}, preset ${settings.preset}${depth}`;
 }
 
 /** One-line description of what will happen to the audio stream. */
@@ -71,8 +82,8 @@ function installInterruptHandler() {
  * `prompts` only renders the description of the highlighted row - putting the
  * numbers there would hide the very figures the choice depends on.
  */
-function buildPresetChoices(analysis) {
-  const rows = generatePresetChoices(analysis).map((choice) => ({
+function buildPresetChoices(analysis, measuredVideoBps) {
+  const rows = generatePresetChoices(analysis, measuredVideoBps).map((choice) => ({
     key: choice.key,
     savings: choice.savings,
     name: choice.preset.name,
@@ -172,9 +183,35 @@ async function resolveSettings(analysis, options) {
   if (presetKey) return { status: 'ready', settings: getPreset(presetKey) };
   if (assumeYes) return { status: 'ready', settings: getPreset(DEFAULT_PRESET) };
 
-  const { choices, everyPresetGrows } = buildPresetChoices(analysis);
+  // Encode a few seconds of the real thing so the menu shows a measured size
+  // rather than a resolution-derived guess.
+  let measuredVideoBps = null;
+  if (shouldSample(analysis)) {
+    const bar = ui.createProgressBar('Sampling');
+    const probeSettings = {
+      ...getPreset(MEASURED_PRESET),
+      pixelFormat: resolvePixelFormat(analysis)
+    };
+
+    try {
+      measuredVideoBps = await measureVideoBitrate(
+        options.filePath, analysis, probeSettings, (fraction) => bar.update(fraction)
+      );
+      bar.finish();
+    } catch {
+      bar.abort();
+      // A failed sample is not fatal; fall back to the static estimate.
+    }
+  }
+
+  const { choices, everyPresetGrows } = buildPresetChoices(analysis, measuredVideoBps);
 
   ui.blank();
+  if (measuredVideoBps === null && shouldSample(analysis)) {
+    ui.info('Estimates below are approximate (sampling unavailable)');
+  } else if (measuredVideoBps === null) {
+    ui.info('Estimates below are approximate; the file is too short to sample');
+  }
   if (everyPresetGrows) {
     ui.warn('Every preset estimates a larger file than the original');
     ui.blank();
@@ -291,7 +328,7 @@ async function processVideo(filePath, options = {}) {
       ui.warn(`${proposal.reason}, expect little gain from reencoding`);
     }
 
-    const resolved = await resolveSettings(analysis, options);
+    const resolved = await resolveSettings(analysis, { ...options, filePath });
 
     if (resolved.status === 'cancelled') {
       ui.blank();
@@ -310,12 +347,33 @@ async function processVideo(filePath, options = {}) {
     // Resolved per file: a batch shares one preset, but each source has its own
     // audio, so the copy-or-encode decision cannot be shared along with it.
     const audio = resolveAudioPlan(analysis, settings);
-    const effectiveSettings = { ...settings, audioCopy: audio.copy, audioBitrate: audio.bitrate };
+    const video = resolveVideoPlan(analysis, settings, path.extname(filePath));
+    const effectiveSettings = {
+      ...settings,
+      audioCopy: audio.copy,
+      audioBitrate: audio.bitrate,
+      videoCopy: video.copy,
+      pixelFormat: video.pixelFormat,
+      sourceVideoCodec: analysis.videoCodec
+    };
 
     ui.heading('Encoding');
-    ui.field('Video', `${settings.videoCodec}, CRF ${settings.crf}, preset ${settings.preset}`);
+    ui.field('Video', describeVideoPlan(video, settings));
     ui.field('Audio', describeAudioPlan(audio, settings));
     ui.blank();
+
+    // libx264 cannot carry HDR10 mastering-display or MaxCLL metadata at all,
+    // and this ffmpeg build cannot tonemap, so the choice is preserve or lose.
+    if (analysis.isHDR && !video.copy && settings.videoCodec !== 'libx265') {
+      ui.warn(`HDR source (${analysis.colorTransfer}): ${settings.videoCodec} cannot carry HDR10 mastering metadata`);
+      ui.info('The HEVC High Quality preset is the only one that preserves it');
+      ui.blank();
+    }
+
+    if (video.copy && audio.copy) {
+      ui.warn('Both streams would be copied, so reencoding would change nothing');
+      ui.blank();
+    }
 
     const encodedPath = await runEncode(filePath, analysis, effectiveSettings);
 

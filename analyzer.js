@@ -5,6 +5,28 @@ import ffprobePath from '@ffprobe-installer/ffprobe';
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
 
+// Transfer functions that denote HDR: PQ (HDR10/Dolby Vision) and HLG.
+const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67']);
+
+/**
+ * Parses ffprobe's rational frame rate, e.g. "30/1" or "24000/1001".
+ *
+ * Evaluating this string as code would run attacker-controlled text from an
+ * untrusted file's metadata, so it is parsed arithmetically instead.
+ *
+ * @param {string} rate - Rational as reported by ffprobe
+ * @returns {number} Frames per second, or 0 when unparseable
+ */
+function parseFrameRate(rate) {
+  const [numerator, denominator] = String(rate ?? '').split('/').map(Number);
+
+  if (!Number.isFinite(numerator) || numerator <= 0) return 0;
+  if (denominator === undefined) return numerator;
+  if (!Number.isFinite(denominator) || denominator === 0) return 0;
+
+  return numerator / denominator;
+}
+
 /**
  * Analyzes a video file and returns its metadata
  * @param {string} filePath - Path to the video file
@@ -38,8 +60,14 @@ export async function analyzeVideo(filePath) {
         videoCodec: videoStream.codec_name,
         width: videoStream.width,
         height: videoStream.height,
-        fps: eval(videoStream.r_frame_rate), // e.g., "30/1" or "24000/1001"
+        fps: parseFrameRate(videoStream.r_frame_rate),
         pixelFormat: videoStream.pix_fmt,
+        colorPrimaries: videoStream.color_primaries ?? null,
+        colorTransfer: videoStream.color_transfer ?? null,
+        colorSpace: videoStream.color_space ?? null,
+        colorRange: videoStream.color_range ?? null,
+        // Both HDR transfer functions must be tested: PQ (HDR10) and HLG.
+        isHDR: HDR_TRANSFERS.has(videoStream.color_transfer),
         audioStreams: audioStreams.map(a => ({
           codec: a.codec_name,
           bitrate: a.bit_rate ? parseInt(a.bit_rate) : null,

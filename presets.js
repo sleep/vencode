@@ -60,6 +60,82 @@ export const PRESETS = {
   }
 };
 
+// Rough iso-quality efficiency ranking; lower is more efficient. Used only to
+// spot a downgrade, so neighbouring codecs sharing a rank is fine.
+const CODEC_RANK = new Map([
+  ['av1', 0], ['libaom-av1', 0], ['libsvtav1', 0],
+  ['hevc', 1], ['h265', 1], ['libx265', 1], ['vp9', 1], ['libvpx-vp9', 1],
+  ['h264', 2], ['libx264', 2], ['vp8', 2],
+  ['mpeg4', 3], ['msmpeg4v3', 3], ['wmv3', 3], ['vc1', 3],
+  ['mpeg2video', 4], ['mpeg1video', 4], ['h263', 4], ['mjpeg', 4]
+]);
+
+const DEFAULT_RANK = 2;
+
+// The preset a sample encode is measured at; every other preset is scaled
+// relative to it via sizeFactor.
+export const MEASURED_PRESET = 'BALANCED';
+
+// Pixel formats carrying more than 8 bits per component.
+const HIGH_DEPTH_SUFFIX = /(10|12|14|16)(le|be)$/;
+const HIGH_DEPTH_NAMES = new Set(['p010le', 'p210le', 'p410le']);
+
+// Containers that can only hold VP8/VP9/AV1 video.
+const VP_ONLY_CONTAINERS = new Set(['.webm']);
+const VP_CODECS = new Set(['libvpx', 'libvpx-vp9', 'libaom-av1', 'libsvtav1']);
+
+/**
+ * Picks the output pixel format.
+ *
+ * This is a clamp, not a passthrough: omitting the flag entirely would let
+ * yuv444p, gbrp and rgb24 sources reach High 4:4:4 Predictive, which is a worse
+ * compatibility outcome than the 8-bit floor it replaces. High bit depth is
+ * preserved because flattening 10-bit to 8-bit bands gradients irreversibly,
+ * and the colour tags survive a re-encode regardless, so the old behaviour
+ * produced an 8-bit file still claiming to be HDR.
+ */
+export function resolvePixelFormat(analysis) {
+  const source = analysis.pixelFormat ?? '';
+  const highDepth = HIGH_DEPTH_SUFFIX.test(source) || HIGH_DEPTH_NAMES.has(source);
+
+  // libx264 selects High 10 and libx265 Main 10 automatically for this format.
+  return highDepth ? 'yuv420p10le' : 'yuv420p';
+}
+
+/**
+ * Decides whether the video stream should be re-encoded at all.
+ *
+ * Transcoding into a less efficient codec is never quality-neutral and usually
+ * grows the file, so a source that already uses a better codec is passed
+ * through untouched rather than downgraded.
+ *
+ * @returns {Object} `{ copy, pixelFormat, reason }`
+ */
+export function resolveVideoPlan(analysis, settings, extension = '') {
+  const ext = extension.toLowerCase();
+  const sourceCodec = analysis.videoCodec;
+  const sourceRank = CODEC_RANK.get(sourceCodec) ?? DEFAULT_RANK;
+  const targetRank = CODEC_RANK.get(settings.videoCodec) ?? DEFAULT_RANK;
+
+  // The output container is inherited from the input, so a target codec the
+  // muxer cannot hold would hard fail (this is why .webm input fails today).
+  if (VP_ONLY_CONTAINERS.has(ext) && !VP_CODECS.has(settings.videoCodec)) {
+    return {
+      copy: true,
+      reason: `${ext} cannot hold ${settings.videoCodec}`
+    };
+  }
+
+  if (sourceRank < targetRank) {
+    return {
+      copy: true,
+      reason: `${sourceCodec} is already more efficient than ${settings.videoCodec}`
+    };
+  }
+
+  return { copy: false, pixelFormat: resolvePixelFormat(analysis), reason: null };
+}
+
 /**
  * Decides how to treat the audio stream.
  *
@@ -112,7 +188,7 @@ export function resolveAudioPlan(analysis, settings) {
  * @param {Object} preset - Preset configuration
  * @returns {number} Estimated size in bytes
  */
-export function estimateSize(analysis, preset) {
+export function estimateSize(analysis, preset, measuredVideoBps = null) {
   const { width, height, duration } = analysis;
   const pixels = width * height;
 
@@ -130,8 +206,12 @@ export function estimateSize(analysis, preset) {
     baseBitrate = 15000;
   }
 
-  // Adjust for preset size factor
-  const videoBitrate = baseBitrate * preset.sizeFactor;
+  // A measurement of one preset anchors the absolute scale, which is the part
+  // the resolution tiers get catastrophically wrong; sizeFactor then carries the
+  // relative spread between presets.
+  const videoBitrate = measuredVideoBps === null
+    ? baseBitrate * preset.sizeFactor
+    : (measuredVideoBps / 1000) * (preset.sizeFactor / PRESETS[MEASURED_PRESET].sizeFactor);
   // Use the bitrate the audio will actually end up at, not the preset's target.
   const totalBitrate = videoBitrate + resolveAudioPlan(analysis, preset).bitrate;
 
@@ -144,11 +224,11 @@ export function estimateSize(analysis, preset) {
  * @param {Object} analysis - Video analysis
  * @returns {Array} Array of preset choices
  */
-export function generatePresetChoices(analysis) {
+export function generatePresetChoices(analysis, measuredVideoBps = null) {
   const choices = [];
 
   for (const [key, preset] of Object.entries(PRESETS)) {
-    const estimatedSize = estimateSize(analysis, preset);
+    const estimatedSize = estimateSize(analysis, preset, measuredVideoBps);
     const savings = analysis.fileSize - estimatedSize;
     const savingsPercent = Math.round((savings / analysis.fileSize) * 100);
 

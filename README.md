@@ -16,6 +16,10 @@ Interactive video reencoding tool that analyzes your videos and reencodes them t
 - **Batch Overview**: Scans the whole set first, reports total size and length, then tracks a running total and closes with a summary
 - **Efficiency Advisory**: Flags files that are already well optimized before you spend time reencoding them
 - **Lossless Audio Handling**: Copies the audio stream untouched when reencoding it could only lose quality, and never encodes above the source bitrate
+- **No Codec Downgrades**: Passes through sources already using a more efficient codec instead of transcoding them into a bigger, worse file
+- **Bit Depth Preservation**: Keeps 10-bit sources at 10-bit rather than flattening them to 8-bit
+- **Stream Retention**: Keeps every audio track, subtitle track and attachment, not just the first of each
+- **Measured Estimates**: Encodes short samples of the real file so the preset menu shows a measured size rather than a guess
 - **Safe Interrupt**: Ctrl+C stops ffmpeg, discards the partial output, restores the cursor, and leaves the original untouched
 - **Non-interactive Mode**: `--yes` and `--preset` for scripted runs
 
@@ -251,6 +255,60 @@ will actually end up at, not the preset's nominal target.
 Note that ffmpeg's built in AAC encoder is variable rate and saturates around
 250-290 kbps for stereo, so a 320 kbps target is a ceiling rather than a promise.
 
+## Video Handling
+
+Like audio, the video stream is decided per file rather than blindly reencoded.
+
+### Codec downgrades are refused
+
+Transcoding into a less efficient codec is never quality-neutral and usually
+grows the file. An HEVC source reencoded to H.264 at CRF 18 measured **+91%
+larger** while losing quality. Sources whose codec already beats the preset's
+target are therefore copied through untouched:
+
+```
+  Video         copied, no re-encode (hevc is already more efficient than libx264)
+```
+
+Pick the HEVC preset to genuinely reencode such a file. This also fixes `.webm`
+input, which previously failed outright because libx264 cannot be muxed into it.
+
+### Bit depth is preserved
+
+10-bit sources stay 10-bit. Previously they were flattened to 8-bit while their
+HDR tags survived, producing a file that claimed to be HDR PQ but had 8-bit
+samples, banding included. The pixel format is a clamp rather than a
+passthrough: depth is preserved, chroma is constrained to 4:2:0, so exotic
+formats like `yuv444p` and `rgb24` do not reach profiles most devices cannot
+decode.
+
+Note that libx264 cannot carry HDR10 mastering metadata at all, so HDR sources
+are flagged and pointed at the HEVC preset, which can.
+
+### Every stream is kept
+
+ffmpeg's default selection keeps only the best single stream per type, silently
+discarding extra audio tracks, extra subtitles and MKV attachments. All streams
+are now mapped explicitly and ride along copied.
+
+## Size Estimates
+
+CRF targets a quality level, not a bitrate, so output size depends on content
+and cannot be derived from resolution. For files over five minutes, vencode
+encodes six three-second samples at the chosen settings and anchors the preset
+menu to that measurement. Against full encodes of three 90-second sources, where
+the old model predicted an identical 28.2 MB for all three:
+
+| Content | Actual | Old estimate | Sampled estimate |
+| --- | --- | --- | --- |
+| Low motion | 4.9 MB | +478% | +25% |
+| Mixed | 12.0 MB | +134% | +11% |
+| High motion | 357.5 MB | -92% | -0.1% |
+
+Sampling costs roughly 18 seconds of encoding regardless of length, so about 6%
+at the five-minute threshold and negligible on a feature-length file. Shorter
+files skip it and say so.
+
 ## Safety Features
 
 - **Interactive Control**: You choose whether to encode, which preset, and whether to keep backup
@@ -260,6 +318,7 @@ Note that ffmpeg's built in AAC encoder is variable rate and saturates around
 - **Automatic Rollback**: If anything fails, backup is restored
 - **Skip Option**: Easy to skip files you don't want to reencode
 - **Interrupt Safety**: Ctrl+C mid-encode kills ffmpeg, deletes the partial output, and leaves the original file in place
+- **No Silent Downgrades**: Codec, bit depth and stream losses are refused or reported, never applied quietly
 
 ## Custom Settings
 
