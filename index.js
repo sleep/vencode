@@ -291,6 +291,30 @@ async function processBatch(filePaths, options = {}) {
   console.log(`\n✅ Batch processing complete! Processed ${filePaths.length} file(s).\n`);
 }
 
+const VIDEO_EXTENSIONS = new Set([
+  '.mp4', '.mov', '.mkv', '.avi', '.wmv', '.flv',
+  '.webm', '.m4v', '.mpg', '.mpeg', '.ts', '.3gp'
+]);
+
+/**
+ * Recursively collects video files from a directory
+ */
+function collectVideoFiles(dirPath) {
+  const results = [];
+
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const fullPath = path.join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      results.push(...collectVideoFiles(fullPath));
+    } else if (VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+      results.push(fullPath);
+    }
+  }
+
+  return results.sort();
+}
+
 /**
  * CLI argument parsing
  */
@@ -301,7 +325,7 @@ function main() {
     console.log(`
 vencode - Interactive Video Reencoding Tool
 
-Usage: node index.js [options] <video-file> [video-file2] [video-file3] ...
+Usage: node index.js [options] <video-file-or-folder> [video-file-or-folder2] ...
 
 Options:
   --verbose, -v     Show detailed video information
@@ -311,6 +335,7 @@ Examples:
   node index.js video.mp4
   node index.js --verbose video.mov
   node index.js video1.mp4 video2.mp4 video3.mp4
+  node index.js ./my-videos-folder
 
 Features:
   • Interactive preset selection with estimated savings
@@ -322,6 +347,7 @@ Features:
   • Interactive backup deletion prompt with Yes/No to all for batch processing
   • Preserves original file extension
   • Batch processing: multiple files with shared settings
+  • Folder support: recursively finds video files (${[...VIDEO_EXTENSIONS].join(', ')})
     `);
     process.exit(0);
   }
@@ -330,30 +356,40 @@ Features:
     verbose: args.includes('--verbose') || args.includes('-v')
   };
 
-  const filePaths = args.filter(arg => !arg.startsWith('--') && !arg.startsWith('-'));
+  const inputPaths = args.filter(arg => !arg.startsWith('--') && !arg.startsWith('-'));
 
-  if (filePaths.length === 0) {
-    console.error('Error: No video file(s) specified');
+  if (inputPaths.length === 0) {
+    console.error('Error: No video file(s) or folder(s) specified');
     console.error('Run with --help for usage information');
     process.exit(1);
   }
 
-  // Resolve all file paths to absolute paths
-  const absolutePaths = filePaths.map(fp => path.resolve(fp));
+  // Resolve all input paths to absolute paths
+  const absolutePaths = inputPaths.map(fp => path.resolve(fp));
 
-  // Validate all files exist before starting
-  const missingFiles = absolutePaths.filter(fp => !fs.existsSync(fp));
-  if (missingFiles.length > 0) {
-    console.error('Error: The following file(s) do not exist:');
-    missingFiles.forEach(fp => console.error(`  - ${fp}`));
+  // Validate all paths exist before starting
+  const missingPaths = absolutePaths.filter(fp => !fs.existsSync(fp));
+  if (missingPaths.length > 0) {
+    console.error('Error: The following path(s) do not exist:');
+    missingPaths.forEach(fp => console.error(`  - ${fp}`));
+    process.exit(1);
+  }
+
+  // Expand folders into the video files they contain
+  const filePaths = absolutePaths.flatMap(fp =>
+    fs.statSync(fp).isDirectory() ? collectVideoFiles(fp) : [fp]
+  );
+
+  if (filePaths.length === 0) {
+    console.error('Error: No video files found in the given folder(s)');
     process.exit(1);
   }
 
   // Process single file or batch
-  if (absolutePaths.length === 1) {
-    processVideo(absolutePaths[0], options);
+  if (filePaths.length === 1) {
+    processVideo(filePaths[0], options);
   } else {
-    processBatch(absolutePaths, options);
+    processBatch(filePaths, options);
   }
 }
 

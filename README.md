@@ -2,14 +2,6 @@
 
 Interactive video reencoding tool that analyzes your videos and reencodes them to save space while maintaining indistinguishable quality.
 
-Vibecoded this because I was running out of storage lmao. May be useful to someone in a similar boat.
-
-```bash
-node index.js "/path/to/file1.mov" "/path/to/file2.mp4"
-# will then prompt you to select a quality
-# will start processing, then you can review and decide if you want to overwrite the original
-```
-
 ## Features
 
 - **Interactive Preset Selection**: Choose from multiple quality presets or create custom settings
@@ -39,6 +31,16 @@ npm install
 ```bash
 node index.js video.mp4
 ```
+
+### Folder Usage
+
+Pass a folder to reencode every video file found inside it (recursively):
+
+```bash
+node index.js ./my-videos-folder
+```
+
+The first file's settings are reused for the rest of the batch, same as passing multiple files explicitly.
 
 The tool will:
 1. Analyze your video file
