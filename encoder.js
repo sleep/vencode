@@ -7,6 +7,38 @@ import path from 'path';
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
 
+// The encode in flight, so an interrupt can stop ffmpeg and clear its temp file
+// instead of orphaning both when the process dies.
+let activeEncode = null;
+
+/**
+ * Stops the running encode, if any, and deletes its partial output.
+ * @returns {string|null} Path of the discarded temp file
+ */
+export function abortActiveEncode() {
+  if (!activeEncode) return null;
+
+  const { command, tempOutput } = activeEncode;
+  activeEncode = null;
+
+  try {
+    command.kill('SIGKILL');
+  } catch {
+    // ffmpeg may already be gone; the temp file still needs clearing.
+  }
+
+  try {
+    if (fs.existsSync(tempOutput)) {
+      fs.unlinkSync(tempOutput);
+      return tempOutput;
+    }
+  } catch {
+    // Best effort only - never mask the interrupt with a cleanup error.
+  }
+
+  return null;
+}
+
 /**
  * Encodes a video file with specified settings
  * @param {string} inputPath - Path to input video
@@ -41,6 +73,7 @@ export async function encodeVideo(inputPath, settings, progressCallback = null) 
 
     command
       .on('error', (err) => {
+        activeEncode = null;
         // Clean up temp file on error
         if (fs.existsSync(tempOutput)) {
           fs.unlinkSync(tempOutput);
@@ -48,9 +81,12 @@ export async function encodeVideo(inputPath, settings, progressCallback = null) 
         reject(err);
       })
       .on('end', () => {
+        activeEncode = null;
         resolve(tempOutput);
-      })
-      .run();
+      });
+
+    activeEncode = { command, tempOutput };
+    command.run();
   });
 }
 

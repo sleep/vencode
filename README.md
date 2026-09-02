@@ -4,15 +4,19 @@ Interactive video reencoding tool that analyzes your videos and reencodes them t
 
 ## Features
 
-- **Interactive Preset Selection**: Choose from multiple quality presets or create custom settings
+- **Interactive Preset Selection**: Every preset shows its estimated size and change up front, so the whole menu is comparable at a glance
 - **Smart Analysis**: Examines video bitrate, resolution, codec, and audio streams
 - **Multiple Quality Presets**: From maximum quality to maximum compression
 - **Custom Settings**: Full control over codec, CRF, preset, and audio bitrate
 - **Real-time Estimates**: See estimated file size and savings for each preset
 - **Safe Operation**: Creates backup before replacing, with automatic rollback on errors
 - **Extension Preservation**: Keeps the same file extension (1:1)
-- **Progress Tracking**: Shows encoding progress in real-time
+- **Progress Tracking**: Live progress bar with elapsed time, ETA, and encoding speed
 - **Interactive Backup Management**: Choose whether to keep or delete backup after encoding
+- **Batch Overview**: Scans the whole set first, reports total size and length, then tracks a running total and closes with a summary
+- **Efficiency Advisory**: Flags files that are already well optimized before you spend time reencoding them
+- **Safe Interrupt**: Ctrl+C stops ffmpeg, discards the partial output, restores the cursor, and leaves the original untouched
+- **Non-interactive Mode**: `--yes` and `--preset` for scripted runs
 
 ## Prerequisites
 
@@ -55,9 +59,25 @@ The tool will:
 # Show detailed video information
 node index.js --verbose video.mp4
 
+# Skip all prompts and use the balanced preset
+node index.js --yes video.mp4
+
+# Pick a preset non-interactively, and drop backups afterwards
+node index.js --yes --preset=HEVC_HIGH --delete-backups ./my-videos-folder
+
 # Show help
 node index.js --help
 ```
+
+| Option | Effect |
+| --- | --- |
+| `-v`, `--verbose` | Show detailed video information |
+| `-y`, `--yes` | Skip prompts, use the balanced preset |
+| `--preset=<name>` | `MAXIMUM_QUALITY`, `HIGH_QUALITY`, `BALANCED`, `MAXIMUM_COMPRESSION`, `HEVC_HIGH` |
+| `--delete-backups` | With `--yes`, remove backups after encoding |
+| `-h`, `--help` | Show this help message |
+
+Exit codes: `0` on success, `1` on failure or bad arguments, `130` if interrupted.
 
 ## How It Works
 
@@ -125,49 +145,79 @@ All presets use:
 ## Example Session
 
 ```
-📹 Analyzing: /path/to/video.mp4
+  Source
+  ──────────────────────────────────────────────────────────────────────────
+  File          clips/interview.mp4
+  Resolution    1920x1080
+  Codec         h264
+  Bitrate       5200 kbps
+  Duration      3:00
+  Size          115.3 MB
+  Frame rate    30.00 fps
 
-📊 Video Information:
-  Resolution: 1920x1080
-  Codec: h264
-  Bitrate: 5200 kbps
-  Duration: 180s
-  Size: 115.3 MB
-  FPS: 30.00
+? Select encoding preset › - Use arrow-keys. Return to submit.
+    Maximum Quality         142.8 MB  +24%
+    High Quality            127.4 MB  +11%
+❯   Balanced (Recommended)  105.2 MB   -9% - Great quality, good size savings (CRF 23)
+    Maximum Compression      82.7 MB  -28%
+    HEVC High Quality        73.6 MB  -36%
+    Custom settings
+    Skip
 
-? Select encoding preset: (Use arrow keys)
-❯ Maximum Quality - Visually lossless, larger file size (CRF 18) - Est. size: 142.8 MB - Increase 27.5 MB (24%)
-  High Quality - Excellent quality, good compression (CRF 20) - Est. size: 127.4 MB - Increase 12.1 MB (11%)
-  Balanced (Recommended) - Great quality, good size savings (CRF 23) - Est. size: 105.2 MB - Save 10.1 MB (9%)
-  Maximum Compression - Smaller size, slight quality loss (CRF 26) - Est. size: 82.7 MB - Save 32.6 MB (28%)
-  HEVC High Quality - Best compression with HEVC/H.265 (CRF 24) - Est. size: 73.6 MB - Save 41.7 MB (36%)
-  Custom Settings - Enter your own encoding parameters
-  Skip - Do not reencode this file
+  Encoding
+  ──────────────────────────────────────────────────────────────────────────
+  Video         libx264, CRF 23, preset slow
+  Audio         aac @ 128 kbps
 
-🎬 Starting encoding...
-  Codec: libx264
-  CRF: 23
-  Preset: slow
-  Audio: aac @ 128k
+  Encoding  ████████████▍░░░░░░░░  58%  ·  1:12 elapsed  ·  0:52 left  ·  2.4x  ·  ends 14:32
 
-  Progress: 25%
-  Progress: 50%
-  Progress: 75%
-  Progress: 100%
+  Result
+  ──────────────────────────────────────────────────────────────────────────
+  Original      115.3 MB
+  Encoded       106.8 MB
+  Saved         8.5 MB (7%)
+  Backup        clips/interview.backup.mp4
 
-✅ Encoding complete!
+? Delete backup file? › No
 
-💾 Replacing original file...
+  ·   Backup kept at clips/interview.backup.mp4
 
-✨ Success!
-  Original size: 115.3 MB
-  New size: 106.8 MB
-  Space saved: 8.5 MB (7%)
-  Backup: /path/to/video.backup.mp4
-
-? Delete backup file? (y/N) › No
-✅ Backup kept at: /path/to/video.backup.mp4
+  OK  Done: clips/interview.mp4
 ```
+
+Every preset row carries its own estimate, so you can compare all five without
+arrowing through them. The progress bar repaints in place and sheds detail on
+narrow terminals rather than wrapping; when output is piped it degrades to plain
+percentage lines every 10%, keeping logs readable.
+
+### Batch Session
+
+A folder or multiple files is scanned up front, then processed with the settings
+chosen for the first encoded file:
+
+```
+  Batch
+  ──────────────────────────────────────────────────────────────────────────
+  Files         40
+  Total size    12.4 GB
+  Total length  3:24:10
+  Unreadable    1
+
+  ── File 7 of 40 ─────────────────────────────── 2.1 GB saved so far ──
+  ...
+
+  Summary
+  ──────────────────────────────────────────────────────────────────────────
+  Encoded       38
+  Skipped       1
+  Failed        1
+  Original      12.4 GB
+  Encoded size  5.1 GB
+  Saved         7.3 GB (59%)
+```
+
+Skipping a file moves on to the next one; only cancelling stops the batch. Files
+that fail are reported and counted, and the run exits non-zero.
 
 ## Safety Features
 
@@ -177,6 +227,7 @@ All presets use:
 - **Atomic Replacement**: File replacement is done safely
 - **Automatic Rollback**: If anything fails, backup is restored
 - **Skip Option**: Easy to skip files you don't want to reencode
+- **Interrupt Safety**: Ctrl+C mid-encode kills ffmpeg, deletes the partial output, and leaves the original file in place
 
 ## Custom Settings
 

@@ -113,7 +113,7 @@ export function proposeEncoding(analysis) {
       ? 'File is already well optimized'
       : savingsPercent > 10
         ? `Can save ${savingsPercent}% (${formatBytes(savingsBytes)})`
-        : `Codec optimization (${videoCodec} → h264)`,
+        : `Codec optimization (${videoCodec} -> h264)`,
     settings: {
       videoCodec: 'libx264',
       crf: 23, // Constant Rate Factor (18-28, lower = better quality)
