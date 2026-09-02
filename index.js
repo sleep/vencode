@@ -2,7 +2,8 @@
 
 import { analyzeVideo, proposeEncoding, formatBytes } from './analyzer.js';
 import { encodeVideo, replaceOriginal, removeBackup, abortActiveEncode } from './encoder.js';
-import { PRESETS, MEASURED_PRESET, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan, resolveVideoPlan, resolvePixelFormat } from './presets.js';
+import { PRESETS, MEASURED_PRESET, HARDWARE_MEASURED_PRESET, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan, resolveVideoPlan, resolvePixelFormat, describeQuality, carriesHDR } from './presets.js';
+import { detectHardwareEncoders } from './hardware.js';
 import { shouldSample, measureVideoBitrate, probeVideoBitrate } from './sampler.js';
 import { previouslyProcessed, recordProcessed, indexPath } from './marker.js';
 import * as ui from './ui.js';
@@ -38,8 +39,9 @@ function describeVideoPlan(video, settings) {
     return `${ui.style.green('copied')}, no re-encode (${video.reason})`;
   }
 
-  const depth = video.pixelFormat === 'yuv420p10le' ? ', 10-bit preserved' : '';
-  return `${settings.videoCodec}, CRF ${settings.crf}, preset ${settings.preset}${depth}`;
+  const tenBit = video.pixelFormat === 'yuv420p10le' || video.pixelFormat === 'p010le';
+  const depth = tenBit ? ', 10-bit preserved' : '';
+  return `${settings.videoCodec}, ${describeQuality(settings)}${depth}`;
 }
 
 /** One-line description of what will happen to the audio stream. */
@@ -83,8 +85,8 @@ function installInterruptHandler() {
  * `prompts` only renders the description of the highlighted row - putting the
  * numbers there would hide the very figures the choice depends on.
  */
-function buildPresetChoices(analysis, measuredVideoBps) {
-  const rows = generatePresetChoices(analysis, measuredVideoBps).map((choice) => ({
+function buildPresetChoices(analysis, measured, availableEncoders) {
+  const rows = generatePresetChoices(analysis, measured, availableEncoders).map((choice) => ({
     key: choice.key,
     savings: choice.savings,
     name: choice.preset.name,
@@ -184,20 +186,32 @@ async function resolveSettings(analysis, options) {
   if (presetKey) return { status: 'ready', settings: getPreset(presetKey) };
   if (assumeYes) return { status: 'ready', settings: getPreset(DEFAULT_PRESET) };
 
+  const availableEncoders = await detectHardwareEncoders();
+
   // Encode a few seconds of the real thing so the menu shows a measured size
-  // rather than a resolution-derived guess.
-  let measuredVideoBps = null;
+  // rather than a resolution-derived guess. Each encoder family is anchored by
+  // a measurement of itself, because their output sizes do not track each other
+  // closely enough for one to stand in for the other.
+  const anchors = [{ family: 'software', presetKey: MEASURED_PRESET }];
+  if (availableEncoders.has(PRESETS[HARDWARE_MEASURED_PRESET].videoCodec)) {
+    anchors.push({ family: 'hardware', presetKey: HARDWARE_MEASURED_PRESET });
+  }
+
+  const measured = {};
   if (shouldSample(analysis)) {
     const bar = ui.createProgressBar('Sampling');
-    const probeSettings = {
-      ...getPreset(MEASURED_PRESET),
-      pixelFormat: resolvePixelFormat(analysis)
-    };
 
     try {
-      measuredVideoBps = await measureVideoBitrate(
-        options.filePath, analysis, probeSettings, (fraction) => bar.update(fraction)
-      );
+      for (const [index, anchor] of anchors.entries()) {
+        const preset = getPreset(anchor.presetKey);
+
+        measured[anchor.family] = await measureVideoBitrate(
+          options.filePath,
+          analysis,
+          { ...preset, pixelFormat: resolvePixelFormat(analysis, preset.videoCodec) },
+          (fraction) => bar.update((index + fraction) / anchors.length)
+        );
+      }
       bar.finish();
     } catch {
       bar.abort();
@@ -205,12 +219,12 @@ async function resolveSettings(analysis, options) {
     }
   }
 
-  const { choices, everyPresetGrows } = buildPresetChoices(analysis, measuredVideoBps);
+  const { choices, everyPresetGrows } = buildPresetChoices(analysis, measured, availableEncoders);
 
   ui.blank();
-  if (measuredVideoBps === null && shouldSample(analysis)) {
+  if (measured.software == null && shouldSample(analysis)) {
     ui.info('Estimates below are approximate (sampling unavailable)');
-  } else if (measuredVideoBps === null) {
+  } else if (measured.software == null) {
     ui.info('Estimates below are approximate; the file is too short to sample');
   }
   if (everyPresetGrows) {
@@ -361,10 +375,10 @@ async function processVideo(filePath, options = {}) {
     const audio = resolveAudioPlan(analysis, settings);
 
     // Whether reencoding is worth doing cannot be decided from codec names, so
-    // a short conservative probe measures what it would actually produce.
+    // a short probe measures what it would actually produce.
     const probed = await probeVideoBitrate(filePath, analysis, {
       ...settings,
-      pixelFormat: resolvePixelFormat(analysis)
+      pixelFormat: resolvePixelFormat(analysis, settings.videoCodec)
     }).catch(() => null);
 
     const video = resolveVideoPlan(analysis, settings, path.extname(filePath), probed);
@@ -382,11 +396,20 @@ async function processVideo(filePath, options = {}) {
     ui.field('Audio', describeAudioPlan(audio, settings));
     ui.blank();
 
-    // libx264 cannot carry HDR10 mastering-display or MaxCLL metadata at all,
-    // and this ffmpeg build cannot tonemap, so the choice is preserve or lose.
-    if (analysis.isHDR && !video.copy && settings.videoCodec !== 'libx265') {
+    // H.264 cannot carry HDR10 mastering-display or MaxCLL metadata at all, and
+    // this ffmpeg build cannot tonemap, so the choice is preserve or lose. Both
+    // HEVC encoders carry it, so this turns on the codec rather than the preset.
+    if (analysis.isHDR && !video.copy && !carriesHDR(settings.videoCodec)) {
       ui.warn(`HDR source (${analysis.colorTransfer}): ${settings.videoCodec} cannot carry HDR10 mastering metadata`);
-      ui.info('The HEVC High Quality preset is the only one that preserves it');
+      ui.info('Only the HEVC presets preserve it');
+      ui.blank();
+    }
+
+    // A 10-bit source reaching an encoder with no 10-bit format is flattened to
+    // 8 bits, which bands gradients irreversibly. The pixel format is chosen
+    // silently, so without this the loss would never be mentioned.
+    if (!video.copy && analysis.pixelFormat?.includes('10') && video.pixelFormat === 'yuv420p') {
+      ui.warn(`10-bit source: ${settings.videoCodec} has no 10-bit format and will flatten it to 8-bit`);
       ui.blank();
     }
 
@@ -698,6 +721,7 @@ function printHelp() {
 
   ui.heading('Notes');
   ui.line('Folders are searched recursively for video files.');
+  ui.line('Hardware presets are offered only where an Apple Silicon media engine is found.');
   ui.line(`Recognised extensions: ${[...VIDEO_EXTENSIONS].join(' ')}`);
   ui.line('In a batch the first encoded file\'s settings are reused for the rest.');
   ui.line('The original is backed up before it is replaced.');
@@ -728,6 +752,21 @@ async function main() {
     ui.info('Run with --help for usage information');
     ui.blank();
     process.exit(1);
+  }
+
+  // A hardware preset named on the command line is checked before any file is
+  // touched. The encoder is a property of the machine rather than the argument,
+  // so the alternative is a batch that starts and then fails on every file.
+  if (options.presetKey) {
+    const preset = getPreset(options.presetKey);
+
+    if (preset.hardware && !(await detectHardwareEncoders()).has(preset.videoCodec)) {
+      ui.blank();
+      ui.fail(`Preset ${options.presetKey} needs ${preset.videoCodec}, which this machine cannot run`);
+      ui.info('Hardware presets require an Apple Silicon media engine');
+      ui.blank();
+      process.exit(1);
+    }
   }
 
   // Resolve all input paths to absolute paths

@@ -4,6 +4,7 @@ import ffprobePath from '@ffprobe-installer/ffprobe';
 import fs from 'fs';
 import path from 'path';
 import { markerOutputOptions } from './marker.js';
+import { videoQualityOptions } from './presets.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
@@ -44,7 +45,7 @@ export function abortActiveEncode() {
 const MP4_FAMILY = new Set(['.mp4', '.m4v', '.mov']);
 // Containers that can carry attachments such as mkv subtitle fonts.
 const MATROSKA_FAMILY = new Set(['.mkv', '.webm']);
-const HEVC_NAMES = new Set(['hevc', 'h265', 'libx265']);
+const HEVC_NAMES = new Set(['hevc', 'h265', 'libx265', 'hevc_videotoolbox']);
 
 /**
  * Builds the ordered ffmpeg output arguments.
@@ -73,8 +74,7 @@ export function buildOutputOptions(settings, extension) {
   } else {
     options.push(
       '-c:v', settings.videoCodec,
-      '-crf', String(settings.crf),
-      '-preset', settings.preset,
+      ...videoQualityOptions(settings),
       '-pix_fmt', settings.pixelFormat ?? 'yuv420p'
     );
   }

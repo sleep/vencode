@@ -37,12 +37,22 @@ const INDEX_PATH = path.join(INDEX_DIR, 'processed.json');
 // second and still changes whenever the file is reencoded.
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
 
+/**
+ * The quality target, on whichever scale the encoder used.
+ *
+ * The two scales run in opposite directions, so they cannot share a field name
+ * without a later reader mistaking one for the other.
+ */
+export function qualityLabel(settings) {
+  return settings.hardware ? `q=${settings.quality}` : `crf=${settings.crf}`;
+}
+
 /** Formats the marker payload written into a file's metadata. */
 export function buildMarkerValue(settings) {
   return [
     `${MARKER_KEY.toLowerCase()}/${MARKER_VERSION}`,
     `codec=${settings.videoCodec}`,
-    `crf=${settings.crf}`
+    qualityLabel(settings)
   ].join(' ');
 }
 
@@ -144,7 +154,7 @@ export function recordProcessed(filePath, settings) {
     index[key] = {
       version: MARKER_VERSION,
       videoCodec: settings.videoCodec,
-      crf: settings.crf,
+      quality: qualityLabel(settings),
       name: path.basename(filePath)
     };
 

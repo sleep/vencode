@@ -23,6 +23,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { videoQualityOptions } from './presets.js';
+
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 
 // Sampling encodes SEGMENT_COUNT * SEGMENT_SECONDS of video, so its cost as a
@@ -43,13 +45,30 @@ export function shouldSample(analysis) {
   return Number.isFinite(analysis.duration) && analysis.duration >= MIN_DURATION_FOR_SAMPLING;
 }
 
-// A far cheaper, deliberately conservative probe used only to decide whether
-// reencoding is worth doing at all. A faster x264 preset produces LARGER output
-// at the same CRF, so if even this shows a worthwhile reduction, the real encode
-// at the preset's own speed will do at least as well.
+// A far cheaper probe used only to decide whether reencoding is worth doing at
+// all.
 const PROBE_SEGMENTS = 3;
 const PROBE_SECONDS = 2;
 const PROBE_PRESET = 'veryfast';
+
+/**
+ * The settings the cheap probe should measure at.
+ *
+ * For the software encoders this deliberately understates the saving: a faster
+ * x264 preset produces LARGER output at the same CRF, so if even this shows a
+ * worthwhile reduction, the real encode at the preset's own speed will do at
+ * least as well.
+ *
+ * VideoToolbox has no preset ladder, so there is no cheaper setting to borrow
+ * and no faster-means-bigger relationship to lean on. The probe runs at the
+ * real settings instead, which makes it unbiased rather than conservative, and
+ * costs little because the encoder is fast to begin with.
+ */
+export function probeSettings(settings) {
+  if (settings.hardware) return settings;
+
+  return { ...settings, preset: PROBE_PRESET };
+}
 
 /** Evenly spaced sample start times across the body of the video. */
 function samplePositions(duration, count, seconds) {
@@ -73,8 +92,7 @@ function encodeSegment(inputPath, settings, position, seconds, outputPath) {
       .outputOptions([
         '-t', String(seconds),
         '-c:v', settings.videoCodec,
-        '-crf', String(settings.crf),
-        '-preset', settings.preset,
+        ...videoQualityOptions(settings),
         '-pix_fmt', settings.pixelFormat ?? 'yuv420p',
         // Audio is modelled separately, and excluding it keeps the measurement
         // purely about the video stream.
@@ -147,7 +165,7 @@ export async function probeVideoBitrate(inputPath, analysis, settings) {
   return sample(
     inputPath,
     analysis,
-    { ...settings, preset: PROBE_PRESET },
+    probeSettings(settings),
     PROBE_SEGMENTS,
     PROBE_SECONDS,
     null

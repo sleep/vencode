@@ -7,6 +7,7 @@ Interactive video reencoding tool that analyzes your videos and reencodes them t
 - **Interactive Preset Selection**: Every preset shows its estimated size and change up front, so the whole menu is comparable at a glance
 - **Smart Analysis**: Examines video bitrate, resolution, codec, and audio streams
 - **Multiple Quality Presets**: From maximum quality to maximum compression
+- **Hardware Encoding**: Uses the Apple Silicon media engine where one is present, verified by a trial encode rather than assumed
 - **Custom Settings**: Full control over codec, CRF, preset, and audio bitrate
 - **Real-time Estimates**: See estimated file size and savings for each preset
 - **Safe Operation**: Creates backup before replacing, with automatic rollback on errors
@@ -80,7 +81,7 @@ node index.js --help
 | --- | --- |
 | `-v`, `--verbose` | Show detailed video information |
 | `-y`, `--yes` | Skip prompts, use the balanced preset |
-| `--preset=<name>` | `MAXIMUM_QUALITY`, `HIGH_QUALITY`, `BALANCED`, `MAXIMUM_COMPRESSION`, `HEVC_HIGH` |
+| `--preset=<name>` | `MAXIMUM_QUALITY`, `HIGH_QUALITY`, `BALANCED`, `MAXIMUM_COMPRESSION`, `HEVC_HIGH`, `HEVC_FAST_HW`, `H264_FAST_HW` |
 | `--delete-backups` | With `--yes`, remove backups after encoding |
 | `--force` | Reencode even if vencode made the file |
 | `-h`, `--help` | Show this help message |
@@ -101,6 +102,8 @@ Exit codes: `0` on success, `1` on failure or bad arguments, `130` if interrupte
    - **Balanced (Recommended)** (CRF 23) - Great quality, good size savings
    - **Maximum Compression** (CRF 26) - Smaller size, slight quality loss
    - **HEVC High Quality** (CRF 24) - Best compression with H.265
+   - **HEVC Fast (hardware)** - Same quality as the above, far quicker (only where the media engine exists)
+   - **H.264 Fast (hardware)** - Widest compatibility, barely touches the CPU (only where the media engine exists)
    - **Custom Settings** - Enter your own parameters
    - **Skip** - Don't reencode this file
 
@@ -146,9 +149,22 @@ Exit codes: `0` on success, `1` on failure or bad arguments, `130` if interrupte
 - **Audio**: 128 kbps AAC
 - **Use case**: Best compression ratio, modern devices
 
-All presets use:
+### HEVC Fast (hardware)
+- **Quality**: 65 on the VideoToolbox scale, calibrated to libx265 at CRF 24
+- **Audio**: 128 kbps AAC
+- **Use case**: Large batches, or anywhere the wait matters more than the last tenth of compression
+
+### H.264 Fast (hardware)
+- **Quality**: 58 on the VideoToolbox scale, calibrated to libx264 at CRF 23
+- **Audio**: 128 kbps AAC
+- **Use case**: Widest playback compatibility at almost no CPU cost. Cannot carry 10-bit or HDR
+
+The software presets use:
 - **Preset**: slow (better compression)
-- **Pixel Format**: yuv420p (maximum compatibility)
+- **Pixel Format**: yuv420p, or yuv420p10le for a 10-bit source
+
+The hardware presets have no preset ladder, and take `p010le` for 10-bit under
+HEVC. Hardware H.264 has no 10-bit format at all and says so before flattening.
 
 ## Example Session
 
@@ -193,7 +209,7 @@ All presets use:
   OK  Done: clips/interview.mp4
 ```
 
-Every preset row carries its own estimate, so you can compare all five without
+Every preset row carries its own estimate, so you can compare them all without
 arrowing through them. The progress bar repaints in place and sheds detail on
 narrow terminals rather than wrapping; when output is piped it degrades to plain
 percentage lines every 10%, keeping logs readable.
@@ -269,16 +285,54 @@ rankings compare codecs *at equal quality*, but a 180 Mbps near-lossless HEVC
 capture is nowhere near equal quality: reencoding it to H.264 at CRF 18 measured
 **75% smaller**. An already-lean HEVC file at the same settings would grow.
 
-So a short conservative probe encodes a few seconds at the chosen settings and
-projects the result. If the reduction clears 10%, the file is reencoded;
-otherwise it is copied through untouched with the measured reason given. The
-probe uses a faster x264 preset than the real encode, which produces *larger*
-output at the same CRF, so it never overstates the benefit.
+So a short probe encodes a few seconds at the chosen settings and projects the
+result. If the reduction clears 10%, the file is reencoded; otherwise it is
+copied through untouched with the measured reason given. For the software
+encoders the probe uses a faster x264 preset than the real encode, which produces
+*larger* output at the same CRF, so it never overstates the benefit. VideoToolbox
+has no preset ladder to borrow from, so its probe runs at the real settings:
+unbiased rather than conservative, and cheap because the encoder is fast.
 
 Codec rank survives only as a fallback when no measurement is possible. The
 container check is a hard constraint and outranks both, which is what fixes
 `.webm` input previously failing outright because libx264 cannot be muxed into
 it.
+
+### Hardware encoding is detected, not assumed
+
+Apple Silicon carries fixed-function video encoders that VideoToolbox exposes as
+`hevc_videotoolbox` and `h264_videotoolbox`. They are worth offering and never
+worth substituting silently, so they appear as their own presets rather than
+quietly replacing the software ones.
+
+Availability is established by encoding, not by asking. `ffmpeg -encoders`
+reports what the binary was compiled with, which is a different question from
+what the silicon underneath will accept: the same build lists both encoders on an
+Intel Mac and inside a VM with no passthrough, and only fails once a real encode
+starts. A trial encode of a fraction of a second settles it, costs about 100 ms
+once per run, and hides the presets entirely where it fails.
+
+The quality targets were calibrated rather than chosen. VideoToolbox has no CRF;
+it takes `-q:v` on a 0-100 scale running the opposite direction. Measured against
+the software presets, `-q:v 65` lands within 0.35 VMAF of libx265 at CRF 24, and
+`-q:v 58` within 0.10 VMAF of libx264 at CRF 23.
+
+What that buys, on one six-minute 720p file end to end:
+
+| Preset | Wall clock | Output |
+|---|---|---|
+| HEVC High Quality (libx265 CRF 24) | 184s | 139.0 MB |
+| HEVC Fast (hardware) | 29s | 169.9 MB |
+
+Around six times quicker for a fifth more bytes, and a far larger gap in CPU
+time, which is what decides whether a laptop stays cool and charged through a
+batch. On the encode alone, excluding decode and I/O, the gap is nearer 14x.
+
+Because those two families do not track each other closely, the preset menu
+samples both: one anchor per family, each measured on the real file. On a test
+clip the same source measured 2.74 Mbps under libx264 and 3.87 Mbps under
+hardware HEVC, so scaling one into the other would have misreported every
+hardware row by around 40%.
 
 ### Bit depth is preserved
 
