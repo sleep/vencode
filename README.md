@@ -115,7 +115,7 @@ Exit codes: `0` on success, `1` on failure or bad arguments, `130` if interrupte
 
 ### Maximum Quality
 - **CRF**: 18 (visually lossless)
-- **Audio**: 192 kbps AAC
+- **Audio**: 320 kbps AAC
 - **Use case**: Archival, when quality is paramount
 
 ### High Quality

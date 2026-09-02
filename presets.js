@@ -10,7 +10,7 @@ export const PRESETS = {
     crf: 18,
     preset: 'slow',
     audioCodec: 'aac',
-    audioBitrate: 192,
+    audioBitrate: 320,
     sizeFactor: 1.3 // Relative to balanced
   },
 
