@@ -2,7 +2,7 @@
 
 import { analyzeVideo, proposeEncoding, formatBytes } from './analyzer.js';
 import { encodeVideo, replaceOriginal, removeBackup, abortActiveEncode } from './encoder.js';
-import { PRESETS, generatePresetChoices, estimateSize, getPreset } from './presets.js';
+import { PRESETS, generatePresetChoices, estimateSize, getPreset, resolveAudioPlan } from './presets.js';
 import * as ui from './ui.js';
 import prompts from 'prompts';
 import fs from 'fs';
@@ -28,6 +28,18 @@ function conciseError(error) {
 
   if (lines.length <= 1) return raw;
   return `${lines[0]} (${lines[lines.length - 1]})`;
+}
+
+/** One-line description of what will happen to the audio stream. */
+function describeAudioPlan(audio, settings) {
+  if (audio.reason === 'no audio stream') return 'none';
+
+  if (audio.copy) {
+    return `${ui.style.green('copied')}, no re-encode (${audio.reason})`;
+  }
+
+  const target = `${settings.audioCodec} @ ${audio.bitrate} kbps`;
+  return audio.reason ? `${target} (${audio.reason})` : target;
 }
 
 /**
@@ -295,12 +307,17 @@ async function processVideo(filePath, options = {}) {
 
     const settings = resolved.settings;
 
+    // Resolved per file: a batch shares one preset, but each source has its own
+    // audio, so the copy-or-encode decision cannot be shared along with it.
+    const audio = resolveAudioPlan(analysis, settings);
+    const effectiveSettings = { ...settings, audioCopy: audio.copy, audioBitrate: audio.bitrate };
+
     ui.heading('Encoding');
     ui.field('Video', `${settings.videoCodec}, CRF ${settings.crf}, preset ${settings.preset}`);
-    ui.field('Audio', `${settings.audioCodec} @ ${settings.audioBitrate} kbps`);
+    ui.field('Audio', describeAudioPlan(audio, settings));
     ui.blank();
 
-    const encodedPath = await runEncode(filePath, analysis, settings);
+    const encodedPath = await runEncode(filePath, analysis, effectiveSettings);
 
     // Replace original file (always create backup initially)
     const result = await replaceOriginal(filePath, encodedPath, true);

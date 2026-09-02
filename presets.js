@@ -61,6 +61,52 @@ export const PRESETS = {
 };
 
 /**
+ * Decides how to treat the audio stream.
+ *
+ * Re-encoding lossy audio never recovers what the first encoder discarded, so
+ * targeting a bitrate above the source only stores that generation's artifacts
+ * more faithfully, in a bigger file. Copy when there is nothing to gain, and
+ * otherwise never encode above the source.
+ *
+ * @param {Object} analysis - Video analysis from analyzeVideo()
+ * @param {Object} settings - Preset or custom settings
+ * @returns {Object} `{ copy, bitrate, reason }`
+ */
+export function resolveAudioPlan(analysis, settings) {
+  const target = settings.audioBitrate;
+  const source = analysis.audioStreams[0];
+
+  if (!source) {
+    return { copy: false, bitrate: target, reason: 'no audio stream' };
+  }
+
+  // ffprobe cannot always report a bitrate; encoding at the target is the
+  // predictable fallback when there is nothing to compare against.
+  const sourceKbps = source.bitrate ? Math.round(source.bitrate / 1000) : null;
+  if (sourceKbps === null) {
+    return { copy: false, bitrate: target, reason: 'source bitrate unknown' };
+  }
+
+  if (source.codec === settings.audioCodec && sourceKbps <= target) {
+    return {
+      copy: true,
+      bitrate: sourceKbps,
+      reason: `already ${source.codec} at ${sourceKbps} kbps`
+    };
+  }
+
+  if (sourceKbps < target) {
+    return {
+      copy: false,
+      bitrate: sourceKbps,
+      reason: `capped to the ${sourceKbps} kbps source`
+    };
+  }
+
+  return { copy: false, bitrate: target, reason: null };
+}
+
+/**
  * Calculate estimated size for a preset
  * @param {Object} analysis - Video analysis
  * @param {Object} preset - Preset configuration
@@ -86,7 +132,8 @@ export function estimateSize(analysis, preset) {
 
   // Adjust for preset size factor
   const videoBitrate = baseBitrate * preset.sizeFactor;
-  const totalBitrate = videoBitrate + preset.audioBitrate;
+  // Use the bitrate the audio will actually end up at, not the preset's target.
+  const totalBitrate = videoBitrate + resolveAudioPlan(analysis, preset).bitrate;
 
   // Calculate size: bitrate (kbps) * duration (s) * 1000 / 8
   return Math.round((totalBitrate * 1000 * duration) / 8);

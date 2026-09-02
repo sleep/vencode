@@ -60,10 +60,19 @@ export async function encodeVideo(inputPath, settings, progressCallback = null) 
         `-preset ${settings.preset}`,
         '-movflags +faststart', // Optimize for streaming
         '-pix_fmt yuv420p' // Ensure compatibility
-      ])
-      .audioCodec(settings.audioCodec)
-      .audioBitrate(`${settings.audioBitrate}k`)
-      .output(tempOutput);
+      ]);
+
+    // Passing the audio through untouched avoids a pointless second generation
+    // of lossy encoding when the source is already at or below the target.
+    if (settings.audioCopy) {
+      command = command.audioCodec('copy');
+    } else {
+      command = command
+        .audioCodec(settings.audioCodec)
+        .audioBitrate(`${settings.audioBitrate}k`);
+    }
+
+    command = command.output(tempOutput);
 
     if (progressCallback) {
       command.on('progress', (progress) => {

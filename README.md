@@ -15,6 +15,7 @@ Interactive video reencoding tool that analyzes your videos and reencodes them t
 - **Interactive Backup Management**: Choose whether to keep or delete backup after encoding
 - **Batch Overview**: Scans the whole set first, reports total size and length, then tracks a running total and closes with a summary
 - **Efficiency Advisory**: Flags files that are already well optimized before you spend time reencoding them
+- **Lossless Audio Handling**: Copies the audio stream untouched when reencoding it could only lose quality, and never encodes above the source bitrate
 - **Safe Interrupt**: Ctrl+C stops ffmpeg, discards the partial output, restores the cursor, and leaves the original untouched
 - **Non-interactive Mode**: `--yes` and `--preset` for scripted runs
 
@@ -218,6 +219,37 @@ chosen for the first encoded file:
 
 Skipping a file moves on to the next one; only cancelling stops the batch. Files
 that fail are reported and counted, and the run exits non-zero.
+
+## Audio Handling
+
+Reencoding lossy audio never recovers what the first encoder discarded, so
+targeting a bitrate above the source only stores that generation's artifacts in
+a bigger file. Each file's audio is therefore decided independently of the
+chosen preset:
+
+| Source audio | Action |
+| --- | --- |
+| AAC, at or below the preset target | Copied through untouched, bit for bit |
+| AAC, above the preset target | Reencoded at the target (a deliberate downscale) |
+| Other codec, below the target | Reencoded, capped to the source bitrate |
+| Other codec, at or above the target | Reencoded at the target |
+| Bitrate unreported by ffprobe | Reencoded at the target |
+| No audio stream | Nothing to do |
+
+The encoding panel states which applies, for example:
+
+```
+  Audio         copied, no re-encode (already aac at 128 kbps)
+  Audio         aac @ 96 kbps (capped to the 96 kbps source)
+  Audio         aac @ 320 kbps
+```
+
+In a batch the preset is shared across files but this decision is not, since
+every source has its own audio. Preset size estimates use the bitrate the audio
+will actually end up at, not the preset's nominal target.
+
+Note that ffmpeg's built in AAC encoder is variable rate and saturates around
+250-290 kbps for stereo, so a 320 kbps target is a ceiling rather than a promise.
 
 ## Safety Features
 
