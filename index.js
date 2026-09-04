@@ -6,6 +6,7 @@ import { PRESETS, MEASURED_PRESET, HARDWARE_MEASURED_PRESET, generatePresetChoic
 import { detectHardwareEncoders } from './hardware.js';
 import { shouldSample, measureVideoBitrate, probeVideoBitrate } from './sampler.js';
 import { previouslyProcessed, recordProcessed, indexPath } from './marker.js';
+import { VIDEO_EXTENSIONS, collectVideoFiles } from './scanner.js';
 import * as ui from './ui.js';
 import prompts from 'prompts';
 import fs from 'fs';
@@ -629,30 +630,6 @@ function printSummary(tally, cancelled) {
   ui.blank();
 }
 
-const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mov', '.mkv', '.avi', '.wmv', '.flv',
-  '.webm', '.m4v', '.mpg', '.mpeg', '.ts', '.3gp'
-]);
-
-/**
- * Recursively collects video files from a directory
- */
-function collectVideoFiles(dirPath) {
-  const results = [];
-
-  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-    const fullPath = path.join(dirPath, entry.name);
-
-    if (entry.isDirectory()) {
-      results.push(...collectVideoFiles(fullPath));
-    } else if (VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-      results.push(fullPath);
-    }
-  }
-
-  return results.sort();
-}
-
 /** Parses argv into options plus input paths. */
 function parseArgs(argv) {
   const options = {
@@ -660,6 +637,7 @@ function parseArgs(argv) {
     assumeYes: false,
     deleteBackups: false,
     force: false,
+    recursive: false,
     help: false,
     presetKey: null,
     paths: []
@@ -676,6 +654,8 @@ function parseArgs(argv) {
       options.deleteBackups = true;
     } else if (arg === '--force') {
       options.force = true;
+    } else if (arg === '--recursive' || arg === '-r') {
+      options.recursive = true;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else if (arg.startsWith('--preset=')) {
@@ -713,15 +693,17 @@ function printHelp() {
   ui.field('--preset=<name>', `One of ${Object.keys(PRESETS).join(', ')}`, 20);
   ui.field('--delete-backups', 'With --yes, remove backups after encoding', 20);
   ui.field('--force', 'Reencode even if vencode made the file', 20);
+  ui.field('-r, --recursive', 'Search subfolders too', 20);
   ui.field('-h, --help', 'Show this help message', 20);
 
   ui.heading('Examples');
   ui.line('vencode video.mp4');
   ui.line('vencode --verbose video.mov');
   ui.line('vencode --yes --preset=HEVC_HIGH ./my-videos-folder');
+  ui.line('vencode -r ./my-videos-folder');
 
   ui.heading('Notes');
-  ui.line('Folders are searched recursively for video files.');
+  ui.line('Folders are searched at the top level only; pass -r to include subfolders.');
   ui.line('Hardware presets are offered only where an Apple Silicon media engine is found.');
   ui.line(`Recognised extensions: ${[...VIDEO_EXTENSIONS].join(' ')}`);
   ui.line('In a batch the first encoded file\'s settings are reused for the rest.');
@@ -785,12 +767,26 @@ async function main() {
 
   // Expand folders into the video files they contain
   const filePaths = absolutePaths.flatMap((fp) =>
-    fs.statSync(fp).isDirectory() ? collectVideoFiles(fp) : [fp]
+    fs.statSync(fp).isDirectory() ? collectVideoFiles(fp, { recursive: options.recursive }) : [fp]
   );
 
   if (filePaths.length === 0) {
     ui.blank();
     ui.fail('No video files found in the given folder(s)');
+
+    // Nothing at the top level means every candidate is deeper down, so a
+    // recursive walk here counts exactly what the missing flag would have
+    // added. Only worth the second walk on the way out.
+    if (!options.recursive) {
+      const deeper = absolutePaths
+        .filter((fp) => fs.statSync(fp).isDirectory())
+        .flatMap((fp) => collectVideoFiles(fp, { recursive: true }));
+
+      if (deeper.length > 0) {
+        ui.info(`${deeper.length} video file(s) are in subfolders - pass -r to include them`);
+      }
+    }
+
     ui.blank();
     process.exit(1);
   }

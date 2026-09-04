@@ -5,7 +5,8 @@ Shrink video files without visibly losing quality.
 ```bash
 npm install
 node index.js video.mp4        # one file
-node index.js ./videos         # whole folder, recursively
+node index.js ./videos         # folder, top level only
+node index.js -r ./videos      # folder and its subfolders
 ```
 
 Pick a preset from the menu, watch the progress bar, done. Your original is backed up first.
@@ -18,6 +19,7 @@ Pick a preset from the menu, watch the progress bar, done. Your original is back
 | `--preset=<name>` | `MAXIMUM_QUALITY`, `HIGH_QUALITY`, `BALANCED`, `MAXIMUM_COMPRESSION`, `HEVC_HIGH`, `HEVC_FAST_HW`, `H264_FAST_HW` |
 | `--delete-backups` | Drop backups after encoding (with `--yes`) |
 | `--force` | Reencode even a file vencode already made |
+| `-r`, `--recursive` | Search subfolders too |
 | `-v`, `--verbose` | Detailed video info |
 | `-h`, `--help` | Help |
 
